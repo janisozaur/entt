@@ -48,7 +48,7 @@ class basic_registry {
 
     template<typename Component>
     struct pool_handler: storage<Entity, Component> {
-        std::size_t *owned;
+        std::size_t super{};
 
         pool_handler() ENTT_NOEXCEPT = default;
 
@@ -164,25 +164,27 @@ class basic_registry {
             if constexpr(std::disjunction_v<std::is_same<Owned, Component>..., std::is_same<Get, Component>...>) {
                 if(((std::is_same_v<Component, Owned> || std::get<pool_type<Owned> *>(cpools)->has(entt)) && ...)
                         && ((std::is_same_v<Component, Get> || std::get<pool_type<Get> *>(cpools)->has(entt)) && ...)
-                        && !(std::get<pool_type<Exclude> *>(cpools)->has(entt) || ...))
+                        && !(std::get<pool_type<Exclude> *>(cpools)->has(entt) || ...)
+                        && !(std::get<0>(cpools)->index(entt) < owned))
                 {
-                    const auto pos = this->owned++;
+                    const auto pos = owned++;
                     (std::get<pool_type<Owned> *>(cpools)->swap(std::get<pool_type<Owned> *>(cpools)->index(entt), pos), ...);
                 }
             } else if constexpr(std::disjunction_v<std::is_same<Exclude, Component>...>) {
                 if((std::get<pool_type<Owned> *>(cpools)->has(entt) && ...)
                         && (std::get<pool_type<Get> *>(cpools)->has(entt) && ...)
-                        && ((std::is_same_v<Exclude, Component> || !std::get<pool_type<Exclude> *>(cpools)->has(entt)) && ...))
+                        && ((std::is_same_v<Exclude, Component> || !std::get<pool_type<Exclude> *>(cpools)->has(entt)) && ...)
+                        && !(std::get<0>(cpools)->index(entt) < owned))
                 {
-                    const auto pos = this->owned++;
+                    const auto pos = owned++;
                     (std::get<pool_type<Owned> *>(cpools)->swap(std::get<pool_type<Owned> *>(cpools)->index(entt), pos), ...);
                 }
             }
         }
 
         void discard_if(const Entity entt) {
-            if(std::get<0>(cpools)->has(entt) && std::get<0>(cpools)->index(entt) < this->owned) {
-                const auto pos = --this->owned;
+            if(std::get<0>(cpools)->has(entt) && std::get<0>(cpools)->index(entt) < owned) {
+                const auto pos = --owned;
                 (std::get<pool_type<Owned> *>(cpools)->swap(std::get<pool_type<Owned> *>(cpools)->index(entt), pos), ...);
             }
         }
@@ -319,7 +321,7 @@ public:
     /*! @brief Underlying version type. */
     using version_type = typename traits_type::version_type;
     /*! @brief Unsigned integer type. */
-    using size_type = typename sparse_set<Entity>::size_type;
+    using size_type = std::size_t;
 
     /*! @brief Default constructor. */
     basic_registry() ENTT_NOEXCEPT = default;
@@ -1085,12 +1087,9 @@ public:
      */
     template<typename Component, typename Compare, typename Sort = std_sort, typename... Args>
     void sort(Compare compare, Sort algo = Sort{}, Args &&... args) {
-        if(auto *cpool = assure<Component>(); cpool->owned) {
-            const auto last = cpool->end() - *cpool->owned;
-            cpool->sort(cpool->begin(), last, std::move(compare), std::move(algo), std::forward<Args>(args)...);
-        } else {
-            cpool->sort(cpool->begin(), cpool->end(), std::move(compare), std::move(algo), std::forward<Args>(args)...);
-        }
+        auto *cpool = assure<Component>();
+        ENTT_ASSERT(!cpool->super);
+        cpool->sort(cpool->begin(), cpool->end(), std::move(compare), std::move(algo), std::forward<Args>(args)...);
     }
 
     /**
@@ -1130,8 +1129,9 @@ public:
      */
     template<typename To, typename From>
     void sort() {
-        ENTT_ASSERT(!owned<To>());
-        assure<To>()->respect(*assure<From>());
+        auto *cpool = assure<To>();
+        ENTT_ASSERT(!cpool->super);
+        cpool->respect(*assure<From>());
     }
 
     /**
@@ -1318,17 +1318,6 @@ public:
     }
 
     /**
-     * @brief Checks whether a given component belongs to a group.
-     * @tparam Component Type of component in which one is interested.
-     * @return True if the component belongs to a group, false otherwise.
-     */
-    template<typename Component>
-    bool owned() const ENTT_NOEXCEPT {
-        const auto *cpool = pool<Component>();
-        return cpool && cpool->owned;
-    }
-
-    /**
      * @brief Returns a group for the given components.
      *
      * This kind of objects are created on the fly and share with the registry
@@ -1361,6 +1350,8 @@ public:
         static_assert(sizeof...(Owned) + sizeof...(Get) + sizeof...(Exclude) > 1);
 
         using handler_type = group_handler<exclude_t<Exclude...>, get_t<Get...>, Owned...>;
+
+        constexpr auto size = sizeof...(Owned) + sizeof...(Get) + sizeof...(Exclude);
         const auto cpools = std::make_tuple(assure<Owned>()..., assure<Get>()..., assure<Exclude>()...);
         const std::size_t extent[3]{sizeof...(Owned), sizeof...(Get), sizeof...(Exclude)};
         handler_type *curr = nullptr;
@@ -1376,6 +1367,11 @@ public:
         }
 
         if(!curr) {
+            ENTT_ASSERT(std::all_of(groups.cbegin(), groups.cend(), [&extent](const auto &gdata) {
+                const std::size_t diff[3]{ (0u + ... + gdata.owned(type<Owned>())), (0u + ... + gdata.get(type<Get>())), (0u + ... + gdata.exclude(type<Exclude>())) };
+                return !diff[0] || ((std::equal(std::begin(diff), std::end(diff), extent) || std::equal(std::begin(diff), std::end(diff), gdata.extent)));
+            }));
+
             groups.push_back(group_data{
                 { sizeof...(Owned), sizeof...(Get), sizeof...(Exclude) },
                 decltype(group_data::group){new handler_type{cpools}, [](void *gptr) { delete static_cast<handler_type *>(gptr); }},
@@ -1386,9 +1382,7 @@ public:
 
             curr = static_cast<handler_type *>(groups.back().group.get());
 
-            ENTT_ASSERT((!std::get<pool_type<Owned> *>(cpools)->owned && ...));
-            ((std::get<pool_type<Owned> *>(cpools)->owned = &curr->owned), ...);
-
+            ((std::get<pool_type<Owned> *>(cpools)->super = std::max(std::get<pool_type<Owned> *>(cpools)->super, size)), ...);
             (std::get<pool_type<Owned> *>(cpools)->on_construct().template connect<&handler_type::template maybe_valid_if<Owned>>(*curr), ...);
             (std::get<pool_type<Owned> *>(cpools)->on_destroy().template connect<&handler_type::discard_if>(*curr), ...);
 
@@ -1414,9 +1408,10 @@ public:
                     if constexpr(sizeof...(Owned) == 0) {
                         curr->set.construct(entity);
                     } else {
-                        const auto pos = curr->owned++;
-                        // useless this-> used to suppress a warning with clang
-                        (std::get<pool_type<Owned> *>(cpools)->swap(std::get<pool_type<Owned> *>(cpools)->index(entity), pos), ...);
+                        if(!(std::get<0>(cpools)->index(entity) < curr->owned)) {
+                            const auto pos = curr->owned++;
+                            (std::get<pool_type<Owned> *>(cpools)->swap(std::get<pool_type<Owned> *>(cpools)->index(entity), pos), ...);
+                        }
                     }
                 }
             });
@@ -1425,7 +1420,7 @@ public:
         if constexpr(sizeof...(Owned) == 0) {
             return { &curr->set, std::get<pool_type<Get> *>(cpools)... };
         } else {
-            return { &curr->owned, std::get<pool_type<Owned> *>(cpools)... , std::get<pool_type<Get> *>(cpools)... };
+            return { &std::get<0>(cpools)->super, &curr->owned, std::get<pool_type<Owned> *>(cpools)... , std::get<pool_type<Get> *>(cpools)... };
         }
     }
 

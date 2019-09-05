@@ -24,10 +24,12 @@ TODO
 * make meta work across boundaries
   - inline variables are fine here, only the head represents a problem
   - we should always resolve by looking into the list of types when working across boundaries, no direct resolve
-* nested groups: AB/ABC/ABCD/... (hints: sort, check functions)
 * snapshot rework/deprecation
   - create(hint: entity) -> force-create
   - assign<T...>(first, last)
 * use unordered_map for named pools and context variables:
   - use direct access (pool-like) also for context variables
   - improves multi-stomp
+* nested groups: AB/ABC/ABCD/... (hints: sort, check functions)
+  - merge group handlers in a single class
+  - doc, test
